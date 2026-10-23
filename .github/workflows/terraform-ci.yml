@@ -161,7 +161,7 @@ jobs:
       # holds only the summary line. The full text is in the artifact above.
       - name: Comment on pull request
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           ENV_NAME: ${{ matrix.env }}
         with:
