@@ -9,20 +9,8 @@ name: Terraform CI
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "modules/**"
-      - "environments/**"
-      - ".github/workflows/**"
-      - ".tflint.hcl"
-      - ".checkov.yaml"
   push:
     branches: [main]
-    paths:
-      - "modules/**"
-      - "environments/**"
-      - ".github/workflows/**"
-      - ".tflint.hcl"
-      - ".checkov.yaml"
   workflow_dispatch:
 
 # Least privilege: read-only by default. A job asks for more only if it needs it.
