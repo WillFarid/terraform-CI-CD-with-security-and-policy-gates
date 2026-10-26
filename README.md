@@ -122,3 +122,11 @@ This needs an AWS account and is deliberately off by default. With `AWS_ENABLED`
 ## Skills demonstrated
 
 GitHub Actions (matrix builds, reusable gate pattern, least-privilege permissions, environments and approvals, artifacts, OIDC), Terraform multi-environment layout, DevSecOps tooling (tflint, checkov, pre-commit, terraform-docs), IAM trust-policy design, and branch protection with required status checks.
+
+## 👩‍💻 Author
+
+**Will Farid**, Cloud Engineer
+
+## ⭐ Support
+
+If you found this project useful, consider giving it a ⭐ on GitHub.
