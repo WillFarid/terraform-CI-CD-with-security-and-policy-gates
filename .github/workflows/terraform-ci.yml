@@ -53,6 +53,26 @@ jobs:
         working-directory: environments/${{ matrix.env }}
         run: terraform validate
 
+  validate-bootstrap:
+    name: validate (bootstrap)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Init (no backend)
+        working-directory: bootstrap
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        working-directory: bootstrap
+        run: terraform validate
+
   tflint:
     name: tflint
     runs-on: ubuntu-latest
@@ -87,10 +107,10 @@ jobs:
       - name: Install checkov
         run: pip install checkov==3.3.30
 
-      # Modules directly, plus prod (the hardened reference environment).
+      # Modules, prod (the hardened reference environment) and the bootstrap stack.
       # Dev is cost-optimized on purpose and is not scanned.
       - name: Security scan
-        run: checkov -d modules -d environments/prod --framework terraform --compact --quiet
+        run: checkov -d modules -d environments/prod -d bootstrap --framework terraform --compact --quiet
 
   plan:
     name: plan (${{ matrix.env }})
@@ -184,7 +204,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [fmt-validate, tflint, checkov, plan]
+    needs: [fmt-validate, validate-bootstrap, tflint, checkov, plan]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
