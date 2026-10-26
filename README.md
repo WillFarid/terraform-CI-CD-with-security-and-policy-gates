@@ -114,7 +114,6 @@ This needs an AWS account and is deliberately off by default. With `AWS_ENABLED`
 
 ## Honest limitations and what I would add next
 
-- The deployment half is written and validated but not run against AWS.
 - The apply roles use `PowerUserAccess` plus IAM limited to the project prefix. That is wider than ideal. In a real account I would run the pipeline once, then replace it with a policy generated from CloudTrail by IAM Access Analyzer.
 - The apply workflow is manual. A production setup could deploy `dev` automatically after every merge.
 - Next additions: Infracost cost estimates on pull requests, policy-as-code with OPA or Conftest, Terratest for module tests, a scheduled drift-detection plan, and pinning third-party actions to commit SHAs.
