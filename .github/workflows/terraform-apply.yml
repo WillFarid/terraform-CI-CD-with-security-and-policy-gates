@@ -1,0 +1,130 @@
+# -----------------------------------------------------------------------------
+# Terraform Apply (deployment)
+#
+# Manual trigger only. Two jobs:
+#   1. plan   read-only role, produces a saved plan and shows it in the summary
+#   2. apply  runs in the chosen GitHub Environment. For prod, GitHub waits for
+#             a human approval BEFORE this job starts. It applies exactly the
+#             saved plan from job 1, so what was reviewed is what gets deployed.
+#
+# Authentication uses OIDC: no AWS keys are stored anywhere.
+#
+# SAFE WITHOUT AN AWS ACCOUNT: both jobs are skipped unless the repository
+# variable AWS_ENABLED is set to "true". See the README, "Enabling deployment".
+# -----------------------------------------------------------------------------
+name: Terraform Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+
+permissions:
+  contents: read
+
+# One deployment per environment at a time, and never cancel one halfway.
+concurrency:
+  group: terraform-apply-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.16.3"
+  TF_VAR_mock_mode: "false" # real credentials, real AWS calls
+
+jobs:
+  plan:
+    name: plan (${{ inputs.environment }})
+    if: vars.AWS_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write # needed to request the OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Assume the read-only plan role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Init
+        working-directory: environments/${{ inputs.environment }}
+        run: terraform init -input=false
+
+      - name: Plan
+        working-directory: environments/${{ inputs.environment }}
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Show plan in the job summary
+        working-directory: environments/${{ inputs.environment }}
+        run: |
+          terraform show -no-color tfplan > plan.txt
+          {
+            echo "### Plan for ${{ inputs.environment }}"
+            echo '```'
+            head -c 60000 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the plan for the apply job
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: environments/${{ inputs.environment }}/tfplan
+          retention-days: 1
+
+  apply:
+    name: apply (${{ inputs.environment }})
+    needs: plan
+    if: vars.AWS_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Everything above this job is read-only. Reaching this job is what triggers
+    # the environment's protection rules (required reviewers for prod).
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # AWS_APPLY_ROLE_ARN is defined per environment, so dev and prod each
+      # resolve to their own role.
+      - name: Assume the apply role for this environment (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Download the reviewed plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: environments/${{ inputs.environment }}
+
+      - name: Init
+        working-directory: environments/${{ inputs.environment }}
+        run: terraform init -input=false
+
+      - name: Apply the saved plan
+        working-directory: environments/${{ inputs.environment }}
+        run: terraform apply -input=false tfplan

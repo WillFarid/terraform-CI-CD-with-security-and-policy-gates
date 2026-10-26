@@ -1,179 +1,124 @@
-# AWS 3-Tier Architecture with Terraform
+# Terraform CI/CD with Security and Policy Gates
 
-A production-style, multi-environment AWS 3-tier architecture written as reusable Terraform modules, with automated quality gates (formatting, linting, security scanning, generated docs).
+[![Terraform CI](https://github.com/WillFarid/terraform-CI-CD-with-security-and-policy-gates/actions/workflows/terraform-ci.yml/badge.svg)](https://github.com/WillFarid/terraform-CI-CD-with-security-and-policy-gates/actions/workflows/terraform-ci.yml)
 
-> This project was built using mock credentials (see [Running it offline](#running-it-offline)). A real deployment needs an ACM certificate and a state bucket (see [Before a real deployment](before-a-real-deployment)).
+A GitHub Actions pipeline that checks, scans and plans a multi-environment AWS Terraform codebase on every pull request, blocks the merge when anything fails, and deploys through approval-gated environments using short-lived OIDC credentials instead of stored AWS keys.
 
-| Environment | `terraform plan` result |
-|---|---|
-| dev | 59 to add, 0 to change, 0 to destroy |
-| prod | 61 to add, 0 to change, 0 to destroy |
+The infrastructure it protects is a 3-tier AWS architecture (VPC, ALB, Auto Scaling, encrypted RDS) from my [first project](https://github.com/WillFarid/aws-3tier-terraform-project).
 
-## Architecture
+> **Status.** The CI half is live and runs with no AWS account. The deployment half (OIDC roles and the apply workflow) is fully written and validated, but **has not been exercised against a real AWS account**. It stays switched off until one is connected (see [Enabling deployment](#enabling-deployment)).
+
+## Pipeline
 
 ```mermaid
-flowchart TB
-    Internet(["Internet"])
+flowchart LR
+    DEV["Developer pushes a branch"] --> PR["Pull request to main"]
 
-    subgraph VPC["VPC (10.0.0.0/16 dev, 10.1.0.0/16 prod), 2 Availability Zones"]
+    subgraph CI["CI: runs on every pull request, no AWS account needed"]
         direction TB
-
-        subgraph PUB["Public tier"]
-            ALB["Application Load Balancer<br/>HTTPS 443, HTTP 80 redirects to 443"]
-            NAT["NAT Gateway<br/>1 in dev, 1 per AZ in prod"]
-        end
-
-        subgraph APP["App tier (private subnets)"]
-            ASG["Auto Scaling Group<br/>EC2, IMDSv2, SSM only, no SSH"]
-        end
-
-        subgraph DB["Data tier (isolated subnets, no internet route)"]
-            RDS[("RDS PostgreSQL<br/>encrypted, TLS enforced<br/>Multi-AZ in prod")]
-        end
+        F["fmt + validate<br/>dev, prod, bootstrap"]
+        L["tflint"]
+        C["checkov<br/>security policy scan"]
+        P["terraform plan<br/>dev and prod, mock mode"]
+        F --> P
     end
 
-    SM["Secrets Manager<br/>managed master password"]
-    KMS["KMS key"]
-    S3["S3 bucket<br/>ALB access logs"]
-    CW["CloudWatch<br/>VPC flow logs"]
+    PR --> CI
+    CI --> G{"CI passed<br/>required check"}
+    G -->|"any job red"| BLOCK["Merge blocked"]
+    G -->|"all green"| MERGE["Merge to protected main"]
+    MERGE --> APPLY["Apply workflow<br/>manual trigger"]
 
-    Internet -->|"443 / 80"| ALB
-    ALB -->|"app port 8080"| ASG
-    ASG -->|"5432"| RDS
-    ASG -->|"443 via NAT"| NAT
-    NAT --> Internet
-    ALB -.->|"access logs"| S3
-    RDS -.-> KMS
-    RDS -.-> SM
-    ASG -.->|"reads one secret"| SM
-    VPC -.->|"flow logs"| CW
+    subgraph CD["CD: enabled once an AWS account exists"]
+        direction TB
+        PLAN["Plan job<br/>read-only role via OIDC"]
+        APPROVE{"Approval<br/>required for prod"}
+        DEPLOY["Apply job<br/>per-environment role via OIDC"]
+        PLAN --> APPROVE --> DEPLOY
+    end
+
+    APPLY --> CD
+    DEPLOY --> AWS[("AWS account")]
 ```
+
+## Screenshots
+
+| A deliberately unformatted file is caught | The fix goes green |
+|---|---|
+| ![CI failing](docs/images/ci-failed.png) | ![CI passing](docs/images/ci-passed.png) |
+
+## What runs on every pull request
+
+| Job | What it checks |
+|---|---|
+| **fmt and validate** | Formatting and syntax for `dev` and `prod` |
+| **validate (bootstrap)** | Syntax of the OIDC bootstrap stack |
+| **tflint** | AWS-aware linting (invalid settings, unused variables, deprecated syntax) |
+| **checkov** | Security scan of the modules, `prod` and `bootstrap` |
+| **plan (dev, prod)** | `terraform plan` offline, with a summary comment on the pull request and the full plan as a downloadable artifact |
+| **CI passed** | One final job that requires all of the above. It is the only required status check. |
+
+The same tools run locally on every commit through pre-commit, so most problems are caught before they reach GitHub.
 
 ## Design decisions
 
 | Decision | Why |
 |---|---|
-| **One root module per environment** (`environments/dev`, `environments/prod`) | Separate state files and blast radius. A mistake in dev cannot touch prod. |
-| **Reusable child modules** (`modules/`) | Write once, use in both environments. Environments differ only by inputs. |
-| **Chained security groups** | ALB accepts the internet, app accepts only the ALB, database accepts only the app. No IP ranges to maintain. |
-| **No SSH, no key pairs** | Instances are managed through SSM Session Manager. There is no inbound admin port. |
-| **IMDSv2 required** | Blocks the SSRF-to-credential-theft path. |
-| **RDS-managed master password** | The password lives in Secrets Manager and never appears in code, Git or Terraform state. |
-| **Least-privilege app role** | The app can read exactly one secret and use exactly one KMS key. |
-| **Database subnets with no internet route** | The data tier cannot reach, or be reached from, the internet. |
-| **Customer-managed KMS key with rotation** | Encrypts the database, its storage and the master secret. |
-| **Remote S3 backend with native locking** | Shared, encrypted state with locking (`use_lockfile`, Terraform 1.10+), no DynamoDB table needed. |
-| **Pinned Terraform and provider versions** | Reproducible builds. |
-
-### Dev vs prod
-
-| Setting | Dev | Prod |
-|---|---|---|
-| VPC CIDR | 10.0.0.0/16 | 10.1.0.0/16 |
-| NAT gateways | 1 shared | 1 per AZ |
-| ALB deletion protection | off | on |
-| ALB log retention | 90 days | 365 days |
-| Instances | t3.micro, 2 to 4 | t3.small, 2 to 6 |
-| RDS class | db.t4g.micro | db.t4g.medium |
-| RDS Multi-AZ | off | on |
-| RDS deletion protection | off | on |
-| RDS final snapshot | skipped | taken |
-| Performance Insights | off | on |
-| Flow log retention | 365 days | 365 days |
-
-Dev is cost-optimized and disposable on purpose. Prod is the hardened reference.
+| **One required check (`CI passed`)** | Branch protection depends on a single job that waits for all the others, so jobs can be added or renamed without editing the rule. |
+| **Runs on every pull request, no path filter** | A path filter would leave a required check waiting forever on pull requests that touch no matching file. I hit this exact bug while testing the gate and removed the filter. |
+| **Works without an AWS account** | The provider runs in mock mode and the S3 backend is swapped for a local one inside the runner, so plans are real and need no credentials. |
+| **OIDC instead of access keys** | A workflow asks GitHub for a signed token and AWS exchanges it for credentials that last one hour. There is no secret to leak or rotate. |
+| **Three roles, scoped by token claims** | The plan role is read-only and works from pull requests. Each apply role can only be assumed by a job running in its own GitHub Environment. A forked repository cannot satisfy the trust policy. |
+| **The plan role cannot change state** | It can read state and create or delete the lock file only. |
+| **Each apply role sees only its own state** | The dev role cannot read or change the prod state. |
+| **Plan, approve, then apply the same plan** | The apply job uses the saved plan file from the plan job, so what a reviewer approves is exactly what is deployed. |
+| **Approval before the prod job starts** | The prod job runs in a protected environment, so GitHub pauses for a reviewer before any prod credentials are issued. |
+| **Least-privilege workflow permissions** | The workflow defaults to read-only. Only the plan job may comment on pull requests, and only the CD jobs may request OIDC tokens. |
+| **Pinned tool versions** | Terraform, tflint and checkov match the versions used locally, so results are the same on a laptop and in CI. |
+| **Dependabot and CODEOWNERS** | GitHub Actions versions update through reviewed pull requests, and every change needs the owner's review. |
 
 ## Repository structure
 
 ```text
 .
-├── modules/
-│   ├── vpc/              # VPC, 3 subnet tiers, route tables, NAT, flow logs
-│   ├── security-groups/  # chained ALB -> app -> database security groups
-│   ├── alb/              # ALB, listeners, target group, access-log bucket
-│   ├── compute/          # IAM role, launch template, Auto Scaling Group
-│   └── rds/              # KMS key, PostgreSQL, managed secret
+├── .github/
+│   ├── workflows/
+│   │   ├── terraform-ci.yml       # checks on every pull request
+│   │   └── terraform-apply.yml    # manual, approval-gated deployment
+│   ├── CODEOWNERS
+│   ├── dependabot.yml
+│   └── pull_request_template.md
+├── bootstrap/                     # one-time stack: OIDC provider and the 3 roles
+├── modules/                       # reusable modules (vpc, security-groups, alb, compute, rds)
 ├── environments/
-│   ├── dev/              # root module (calls the modules with dev values)
-│   └── prod/             # root module (same modules, production values)
+│   ├── dev/
+│   └── prod/
 ├── .pre-commit-config.yaml
 ├── .tflint.hcl
 └── .checkov.yaml
 ```
 
-Each module and environment has its own generated README (inputs, outputs, resources) produced by `terraform-docs`.
+## Enabling deployment
 
-## Quality gates
+This needs an AWS account and is deliberately off by default. With `AWS_ENABLED` unset, the apply workflow runs and skips both jobs.
 
-Every commit runs through [pre-commit](https://pre-commit.com):
+1. Create the S3 state bucket (versioning, encryption and public access block on) and put its name in each `backend.tf` and in `bootstrap/variables.tf`.
+2. Apply `bootstrap/` once, from a laptop, with administrator credentials and `mock_mode = false`. It creates the OIDC provider and the three roles. The pipeline cannot create its own identities.
+3. In GitHub, **Settings, Environments**, create `dev` and `prod`. On `prod`, add yourself under **Required reviewers**. On both, restrict **Deployment branches** to `main`.
+4. Add the variables from the bootstrap outputs:
+   - Repository variable `AWS_PLAN_ROLE_ARN` (the plan role)
+   - Environment variable `AWS_APPLY_ROLE_ARN` inside `dev`, and another inside `prod` (each environment's apply role)
+   - Repository variable `AWS_REGION` (optional, defaults to `us-east-1`)
+5. Set the repository variable `AWS_ENABLED` to `true`.
+6. Replace the placeholder ACM certificate and log bucket name in the environments, then run **Actions, Terraform Apply, Run workflow**.
 
-| Tool | Purpose |
-|---|---|
-| `terraform fmt` | Consistent formatting |
-| `terraform validate` + `tflint` | Syntax, AWS-specific linting |
-| `checkov` | Security scanning |
-| `terraform-docs` | Auto-generated module documentation |
+## Honest limitations and what I would add next
 
-Checkov findings were triaged rather than ignored: cheap fixes were applied, and the rest were suppressed inline with a written reason (for example, ALB access-log buckets support SSE-S3 only, not KMS). Dev-only cost trade-offs are documented where they are suppressed.
-
-## Running it offline
-
-The AWS provider is configured with a `mock_mode` variable (default `true`) that supplies fake credentials and skips every call to AWS, so `validate` and `plan` work with no account.
-
-```bash
-cd environments/dev
-
-# Local-only override that swaps the S3 backend for a local one (gitignored)
-cat > backend_override.tf <<'EOF'
-terraform {
-  backend "local" {
-    path = "terraform.tfstate"
-  }
-}
-EOF
-
-terraform init -reconfigure
-terraform fmt -recursive
-terraform validate
-terraform plan
-```
-
-To run the quality gates:
-
-```bash
-pre-commit install
-pre-commit run --all-files
-```
-
-## Before a real deployment
-
-1. Create the S3 state bucket (versioning, encryption and public access block on) and set it in each `backend.tf`.
-2. Set `mock_mode = false` and authenticate through SSO or OIDC.
-3. Replace the placeholder `certificate_arn` with a real ACM certificate for your domain.
-4. Replace the placeholder `access_logs_bucket_name` with a globally unique name.
-5. Pin an exact PostgreSQL minor version instead of the major-version default.
-
-## What I would add in production
-
-- **AWS WAF** on the ALB.
-- **Customer-managed KMS key** for the VPC flow log group, and an explicit KMS key policy.
-- **CloudWatch alarms and a dashboard** (ALB 5xx, unhealthy hosts, RDS CPU and storage) with SNS notifications.
-- **Route 53 and ACM** for the domain and certificate, with a failover design.
-- **CI/CD** with GitHub Actions: `plan` on pull requests, `apply` on merge behind an approval, authenticating through GitHub OIDC.
-- **VPC endpoints** for SSM and Secrets Manager to reduce NAT traffic and cost.
-- **Cost estimate** with Infracost in pull requests. Note that NAT gateways are one of the largest fixed costs here, which is why dev uses a single one.
+- The deployment half is written and validated but not run against AWS.
+- The apply roles use `PowerUserAccess` plus IAM limited to the project prefix. That is wider than ideal. In a real account I would run the pipeline once, then replace it with a policy generated from CloudTrail by IAM Access Analyzer.
+- The apply workflow is manual. A production setup could deploy `dev` automatically after every merge.
+- Next additions: Infracost cost estimates on pull requests, policy-as-code with OPA or Conftest, Terratest for module tests, a scheduled drift-detection plan, and pinning third-party actions to commit SHAs.
 
 ## Skills demonstrated
 
-Terraform modules and multi-environment layout, AWS networking (VPC, subnets, NAT, route tables), security groups and least-privilege IAM, ALB, Auto Scaling, RDS, KMS and Secrets Manager, remote state design, and DevSecOps tooling (tflint, checkov, terraform-docs, pre-commit).
-
-## 👩‍💻 Author
-
-**Will Farid**
-
-Cloud Engineer
----
-
-## ⭐ Support
-
-If you found this project useful, consider giving it a ⭐ on GitHub.
+GitHub Actions (matrix builds, reusable gate pattern, least-privilege permissions, environments and approvals, artifacts, OIDC), Terraform multi-environment layout, DevSecOps tooling (tflint, checkov, pre-commit, terraform-docs), IAM trust-policy design, and branch protection with required status checks.
