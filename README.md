@@ -4,9 +4,9 @@
 
 A GitHub Actions pipeline that checks, scans and plans a multi-environment AWS Terraform codebase on every pull request, blocks the merge when anything fails, and deploys through approval-gated environments using short-lived OIDC credentials instead of stored AWS keys.
 
-The infrastructure it protects is a 3-tier AWS architecture (VPC, ALB, Auto Scaling, encrypted RDS) from my [first project](https://github.com/WillFarid/aws-3tier-terraform-project).
+The infrastructure it protects is a 3-tier AWS architecture (VPC, ALB, Auto Scaling, encrypted RDS).
 
-> **Status.** The CI half is live and runs with no AWS account. The deployment half (OIDC roles and the apply workflow) is fully written and validated, but **has not been exercised against a real AWS account**. It stays switched off until one is connected (see [Enabling deployment](#enabling-deployment)).
+> **Status.** The CI half is live and runs. The deployment half (OIDC roles and the apply workflow) is fully written and validated, It stays switched off until one is connected (see [Enabling deployment](#enabling-deployment)).
 
 ## Pipeline
 
